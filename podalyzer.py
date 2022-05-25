@@ -6,6 +6,8 @@ import ffmpeg
 import urllib.request
 import tempfile
 import json
+import argparse
+import os
 
 # Parse command line arguments
 def parseArgs():
@@ -14,17 +16,24 @@ def parseArgs():
 	p.add_argument('feedurl', help="URL of RSS feed")
 	return p.parse_args()
 
+# Generate a temporary file path and name
+def genTempFile():
+	tempdir = tempfile._get_default_tempdir()
+	tempname = next(tempfile._get_candidate_names())
+	return f"{tempdir}/podalyzer.{tempname}"
+
+
 # Probe file with ffprobe, return audio stream info
-def probeFile(file):
-	probe = ffmpeg.probe(file)
+def probeFile(f):
+	probe = ffmpeg.probe(f)
 	return next((stream for stream in probe['streams'] if stream['codec_type'] == 'audio'), None)
 
 # Run ffmpeg filter against file to return LUFS info
-def getLufs(file):
+def getLufs(f):
 	sp = subprocess.Popen(
 		(
 			ffmpeg
-			.input(f"{file}")
+			.input(f"{f}")
 			.audio.filter("loudnorm", I=-16, TP=-1.5, LRA=11, print_format="json")
 			.output("-", format="null")
 			.global_args("-loglevel", "info")
@@ -34,44 +43,38 @@ def getLufs(file):
 		),
         	stderr=subprocess.PIPE
 	)
-
 	output = "\n".join(sp.communicate()[-1].decode("UTF-8").split("\n")[-13:-1])
 	return json.loads(output)
-	
 
-if __name__ == '__main__':
-
-	feedurl = 'https://feeds.megaphone.fm/20k'
-
+def main(args):
+	feedurl = args.feedurl
 	parsed = podcastparser.parse(feedurl, urllib.request.urlopen(feedurl))
+
 	title = parsed['title']
 	latest_episode = parsed['episodes'][0]
 	episode_title = latest_episode['title']
 	episode_media = latest_episode['enclosures'][0]['url']
 
-	tempdir = tempfile._get_default_tempdir()
-	tempname = next(tempfile._get_candidate_names())
-	#tempfile = f"{tempdir}/{tempname}.mp3"
-	tempfile = '/var/folders/9j/h2nw88l533s2fzs1241k741m0000gn/T/7ylfoe7n.mp3'
-	#urllib.request.urlretrieve(episode_media, tempfile)
+	file = genTempFile()
+	print(f"Downloading to {file}")
+	urllib.request.urlretrieve(episode_media, file)
 
-	probe = ffmpeg.probe(tempfile)
-	audio_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'audio'), None)
+	probeOut = probeFile(file)
 
-	audio_stream = probeFile(tempfile)
-	bit_rate = audio_stream['bit_rate']
-	sample_rate = audio_stream['sample_rate']
-	channel_layout = audio_stream['channel_layout']
+	print("Analying LUFS...")
+	lufsOut = getLufs(file)
 
-	# broken LUFS stuff
-	#audio_in = ffmpeg.input(tempfile).audio
-	#af = audio_in.audio.filter('loudnorm', dualmono='true')
-	lufsOut = getLufs(tempfile)
-	import pprint
-	pprint.pprint(lufsOut)
+	print(f"Title:    {title}")
+	print(f"Episode:  {episode_title}")
+	print(f"CODEC:    {probeOut['codec_name']}")
+	print(f"Bit Rate: {probeOut['bit_rate']}")
+	print(f"Samples:  {probeOut['sample_rate']}")
+	print(f"Mode:     {probeOut['channel_layout']}")
+	print(f"LUFS:    {lufsOut['input_i']}")
+	print(f"Peak:    {lufsOut['input_tp']}")
 
-	print(f"Podcast Title: {title}")
-	print(f"Episode Title: {episode_title}")
-	print(f"Bit Rate:      {bit_rate}")
-	print(f"Sample Rate:   {sample_rate}")
-	print(f"Mode:          {channel_layout}")
+	os.remove(file)
+
+if __name__ == '__main__':
+	main(parseArgs())
+
